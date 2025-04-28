@@ -1,0 +1,180 @@
+# sqp_f24fe3dc6557611d13db76f464be6b517c5eb5b4
+
+default:
+  image: maven:3.8.7-openjdk-18
+
+
+variables:
+  M2_EXTRA_OPTIONS: "-s .m2/settings.xml"
+  IMAGE_NAME: spring-petclinic
+  TAG: $CI_COMMIT_SHA
+  
+stages:
+  - check
+  - build
+  - sonarqube-check
+  - sonarqube-vulnerability-report
+  - trivy file scan
+  - push
+#  - dockerize
+  - docker
+  - trivy image scan
+  - deploy
+#  - run docker image
+
+check-version:
+  stage: check
+  script:
+    - mvn --version
+
+
+
+
+build-job:
+  stage: build
+  script:
+    - echo "Building the JAR file"
+    - mvn package
+    - ls -l target/*.jar
+  artifacts:
+    paths:
+      - target/
+    expire_in: 1 week
+
+
+
+# sonarscan:
+#   stage: sonarscan
+#   variables:
+#     SONAR_USER_HOME: "${CI_PROJECT_DIR}/.sonar" 
+#     SONAR_HOST_URL: $SONAR_HOST_URL
+#     SONAR_TOKEN: $SONAR_TOKEN
+#   image:
+#     name: sonarsource/sonar-scanner-cli:latest
+#     entrypoint: [""]
+#   script:
+#     - sonar-scanner -Dsonar.qualitygate.wait=true -X
+
+sonarqube-check:
+  stage: sonarqube-check
+  image: 
+    name: sonarsource/sonar-scanner-cli:5.0
+    entrypoint: [""]
+  variables:
+    SONAR_USER_HOME: "${CI_PROJECT_DIR}/.sonar"  # Defines the location of the analysis task cache
+    GIT_DEPTH: "0"  # Tells git to fetch all the branches of the project, required by the analysis task
+  cache:
+    key: "${CI_JOB_NAME}"
+    paths:
+      - .sonar/cache
+  script: 
+    - sonar-scanner
+  allow_failure: true
+  only:
+    - merge_requests
+    - master
+    - main
+    - develop
+
+sonarqube-vulnerability-report:
+  stage: sonarqube-vulnerability-report
+  script:
+    - 'curl -u "${SONAR_TOKEN}:" "${SONAR_HOST_URL}/api/issues/gitlab_sast_export?projectKey=Youtube&branch=${CI_COMMIT_BRANCH}&pullRequest=${CI_MERGE_REQUEST_IID}" -o gl-sast-sonar-report.json'
+  allow_failure: true
+  only:
+    - merge_requests
+    - master
+    - main
+    - develop
+  artifacts:
+    expire_in: 1 day
+    reports:
+      sast: gl-sast-sonar-report.json
+  dependencies:
+    - sonarqube-check
+
+
+
+Trivy scan:
+  stage: trivy file scan
+  image:
+    name: aquasec/trivy:latest
+    entrypoint: [""]
+  script:
+    - trivy fs .
+
+Docker build and push:
+  stage: docker
+  image:
+     name: docker:latest
+  services:
+    - docker:dind   
+  script:
+    - docker build -t springbootcicd .    
+    - docker tag springbootcicd $USERNAME/springbootcicd:latest
+    - echo $PASSWORD | docker login -u $USERNAME --password-stdin
+    - docker push $USERNAME/springbootcicd:latest
+
+Scan image:
+  stage: trivy image scan
+  image:
+    name: aquasec/trivy:latest
+    entrypoint: [""]
+  script:
+    - trivy image $USERNAME/springbootcicd:latest
+
+
+#push-to-nexus:
+#  stage: push
+#  script:
+#    - mvn $M2_EXTRA_OPTIONS deploy
+
+# dockerize:
+#  stage: dockerize
+#  image:
+#    name: gcr.io/kaniko-project/executor:v1.9.0-debug
+#    entrypoint: [""]
+#  script:
+#    - mkdir -p /kaniko/.docker
+#    - echo "{\"auths\":{\"${CI_REGISTRY}\":{\"auth\":\"$(printf "%s:%s" "${USERNAME}" "${PASSWORD}" | base64 | tr -d '\n')\"}}}" > /kaniko/.docker/config.json
+#    - /kaniko/executor --context "${CI_PROJECT_DIR}" --destination "$USERNAME/$IMAGE_NAME:$TAG"
+
+
+# Run Docker Image:
+#   stage: run docker image
+#   image:
+#     name: docker:latest
+#   services:
+#     - docker:dind 
+#   script:
+#     - docker run -it -p 3000:3000 shubhammutkalwar/springbootcicd:latest
+
+
+
+deploy-to-kubernetes:
+ stage: deploy
+ image: 
+   name: kunchalavikram/kubectl_helm_cli:latest  # Helm
+   entrypoint: [""]
+ before_script:
+    - mkdir -p ~/.kube
+    - cat "$KUBECONFIG" > ~/.kube/config
+    - chmod 600 ~/.kube/config 
+    - kubectl config get-contexts
+    - kubectl config use-context kubernetes-admin@kubernetes
+    - helm repo add Platform9-Community https://platform9-community.github.io/helm-charts
+    - helm repo update
+#  before_script:
+#     - ssh -i $SSH_KEY ubuntu@$MASTER
+#     - IMAGE_NAME=shubhammutkalwar/springbootcicd  # Replace with your image name
+#     - LATEST_TAG=$(curl -s https://registry.hub.docker.com/v2/repositories/${IMAGE_NAME}/tags | jq -r '.results[].name | sort_by(-.last_updated) | .[0]')
+#     - sed -i "s/<old-image-tag>/${LATEST_TAG}/g" deployment.yml  # Replace image tag
+ artifacts:
+    paths:
+    - deployment.yml
+ script:
+  #  - helm list
+  #  - helm upgrade --install petclinic petclinic-chart/
+    - kubectl apply -f deployment.yml  # Assuming kubectl is configured
+    
+  #  - helm install spring-petclinic-cloud Platform9-Community/spring-petclinic-cloud --namespace spring-petclinic --create-namespace
